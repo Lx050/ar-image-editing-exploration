@@ -2169,3 +2169,27 @@ v4/D（batch40 最优 a=0.3 s=10 两级联合）把 mask=1 全部当作"背景�
 - 下一步：H3 = H2 + 重叠区羽化 + 候选环 20px 优化；v5 源码改造 = gap 区从"均值码"改为"保护区多尺度纹理合成"
 
 **产出**：`/tmp/b45_compare.png`、`/tmp/b45_final.png`、`/tmp/b45_hmatch.png`、`/tmp/b45_h2match.png`；素材 `/tmp/h45_lama_raw.png`、`/tmp/b45_*.png`
+
+---
+
+## Batch 46: v5 源码改造——gap 区"均值码"→"保护区多尺度纹理合成"（lib_h46）
+
+**触发**：用户下令"基于上局冠军马（H2 块级 Quilting）改造——gap 区从'均值码'换成'保护区多尺度纹理合成'"。
+
+**改造（已查证，diff 131 行）**：
+- `lib_h44 → lib_h46`（`cp -r`），`bitresedit.py` 新增 `_synth_gap_codes()`（latent 空间块级 Quilting：候选=gap 边界 3px 环内保护区 latent patch；两级块 4×4→2×2 BFS 填充；剩余像素最近邻）
+- 校正段 (b)：`corr_bg = _bg_mean - edit_summed_codes`（均值码）→ `corr_bg = _bg_synth - edit_summed_codes`（多尺度纹理合成码）
+- 参数：patch=4, ring=3；10 步 × alpha 0.3，latent_hw=(32,32)，作用于 `src_summed_codes` 潜空间（非像素域）
+
+**跑（A 任务 bird，seed 42，同 a0.7/s10 参数）**：
+- 版本 1（gap=全 mask，无三区域）：gap 区白梯形消除（近白 0.00%）但鸟本体被纹理替换（edit 区缺失，鸟区Δ=88.13）→ 确认需要三区域
+- **版本 2（三区域：prot 62.4% / gap 25.3% / edit 鸟 12.3%）**：gap 纹理 40.31（v5 16.22↑）、gap 边界 3.18（v5 43.40↓）、近白 0.07%（v5 25.45%↓）；但鸟区被误划入 gap（浅羽>200）致鸟残缺
+- **版本 3（三区域+鸟区膨胀 8px 保护：prot 62.5% / gap 19.2% / edit 18.3%）**：gap 纹理 40.52、**gap 边界 1.52（近无缝）**、近白 0.60%（白梯形消除）、保护区 MAE 6.132（v5 3.744，+2.39 trade-off）、edit 鸟区保留（vs 源 33.95）
+
+**结论（已查证）**：
+- 均值码 → 多尺度纹理合成码成功消除白梯形：gap 区恢复竹叶纹理（std 40 vs 16），gap 边界连续性数量级改善（1.5 vs 43）
+- 三区域划分必要：无 edit 区则鸟本体被背景纹理覆盖
+- trade-off：保护区 MAE 6.13 vs 3.74（latent 合成码强干预的轻微解码漂移），下一步可降 alpha/限制合成码振幅/输出校正补偿
+- 鸟区质量受限于 v5 模型生成结果本身（edit 区=保留模型输出）
+
+**产出**：`/tmp/h46_diff.diff`（131 行）、`/tmp/h46_3reg2_compare.png`、`/tmp/h46_synth.png`（v1）、`/tmp/h46_3reg.png`（v2）、`/tmp/h46_3reg2.png`（v3）；服务器 `/home/lbx/relab-objrel/lib_h46/`、`/tmp/h46/A_h46_3reg2.png`；meta `meta4.json`（32.0s, 10 scales）

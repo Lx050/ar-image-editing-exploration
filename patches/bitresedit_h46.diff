@@ -1,0 +1,131 @@
+--- /home/lbx/relab-objrel/lib_h44/ResidualEdit/bitresedit.py	2026-09-15 10:21:51.896992074 +0800
++++ /home/lbx/relab-objrel/lib_h46/ResidualEdit/bitresedit.py	2026-09-15 11:50:36.668944171 +0800
+@@ -824,8 +824,9 @@
+                     edit_summed_codes
+                     + decode_correction_alpha * prot_gate_lat.unsqueeze(-3) * corr_prot
+                 )
+-                # (b) background gap -> surrounding-bg mean code
+-                corr_bg = _bg_mean - edit_summed_codes
++                # (b) background gap -> multi-scale texture-synthesized code (h46)
++                _bg_synth = _synth_gap_codes(src_summed_codes, prot_gate_lat, gap_gate_lat)
++                corr_bg = _bg_synth - edit_summed_codes
+                 edit_summed_codes = (
+                     edit_summed_codes
+                     + decode_correction_alpha * gap_gate_lat.unsqueeze(-3) * corr_bg
+@@ -885,3 +886,116 @@
+             intermediates["editing_type_id"] = editing_type_id
+             return img, intermediates
+         return img
++
++def _synth_gap_codes(src_codes, prot_lat, gap_lat, patch=4, ring=3):
++    """h46: gap 区目标码 = 保护区多尺度纹理合成（块级 Quilting，替代均值码）。
++    src_codes: (1,1,C,H,W); prot_lat/gap_lat: (1,1,H,W) 0/1
++    返回 (1,1,C,H,W): gap区=合成码, 保护区=原码
++    """
++    import numpy as np
++    import collections
++    import heapq
++    import torch.nn.functional as _Fn
++    H, W = src_codes.shape[-2:]
++    C = src_codes.shape[-3]
++    codes = src_codes[0, 0].detach().clone()
++    prot = (prot_lat[0, 0] > 0.5)
++    gap = (gap_lat[0, 0] > 0.5)
++    if not gap.any():
++        return src_codes
++    g = gap.float().unsqueeze(0).unsqueeze(0)
++    rk = 2 * ring + 1
++    dil = _Fn.max_pool2d(g, rk, stride=1, padding=ring)
++    cand = (dil[0, 0] > 0.5) & (~gap) & prot
++    cand_ys, cand_xs = torch.where(cand)
++    if len(cand_ys) == 0:
++        return src_codes
++    cand_ys = cand_ys.cpu().numpy(); cand_xs = cand_xs.cpu().numpy()
++    codes_np = codes.cpu().numpy().transpose(1, 2, 0)  # (H,W,C)
++    gap_np = gap.cpu().numpy()
++    prot_np = prot.cpu().numpy()
++    res = codes_np.copy()
++    filled = ~gap_np
++    for P in (patch, max(2, patch // 2)):
++        gy, gx = np.where(gap_np[::P, ::P])
++        todo = [(a, b) for a, b in zip(gy, gx)
++                if gap_np[a*P:a*P+P, b*P:b*P+P].any()]
++        dist = np.full((H // P + 2, W // P + 2), 1e9)
++        heap = []
++        for a, b in todo:
++            y, x = a * P, b * P
++            nb = False
++            if y > 0 and prot_np[y-1, x:x+P].any(): nb = True
++            if x > 0 and prot_np[y:y+P, x-1].any(): nb = True
++            if y + P < H and prot_np[y+P, x:x+P].any(): nb = True
++            if x + P < W and prot_np[y:y+P, x+P].any(): nb = True
++            if (y > 0 and not gap_np[y-1, x:x+P].any()) or (x > 0 and not gap_np[y:y+P, x-1].any()):
++                nb = True
++            if nb:
++                dist[a, b] = 0; heapq.heappush(heap, (0, a, b))
++        while heap:
++            d, a, b = heapq.heappop(heap)
++            if d > dist[a, b]:
++                continue
++            y, x = a * P, b * P
++            blk_gap = gap_np[y:y+P, x:x+P]
++            if not blk_gap.any():
++                continue
++            tm = np.full((P, P, C), np.nan)
++            ok = np.zeros((P, P), bool)
++            if y > 0:
++                above = res[y-1, x:x+P]
++                a_ok = ~gap_np[y-1, x:x+P]
++                tm[0, a_ok] = above[a_ok]
++                ok[0] |= a_ok
++            if x > 0:
++                left = res[y:y+P, x-1]
++                l_ok = ~gap_np[y:y+P, x-1]
++                tm[:, 0][l_ok] = left[l_ok]
++                ok[:, 0] |= l_ok
++            if y + P < H and not gap_np[y+P, x:x+P].any():
++                tm[P-1] = res[y+P, x:x+P]; ok[P-1] = True
++            if x + P < W and not gap_np[y:y+P, x+P].any():
++                tm[:, P-1] = res[y:y+P, x+P]; ok[:, P-1] = True
++            if not ok.any():
++                continue
++            step = max(1, len(cand_ys) // 800)
++            best = (1e18, None)
++            for i in range(0, len(cand_ys), step):
++                yy, xx = int(cand_ys[i]), int(cand_xs[i])
++                if yy + P > H or xx + P > W:
++                    continue
++                cb = codes_np[yy:yy+P, xx:xx+P]
++                diff = (cb - tm) ** 2
++                dd = np.nansum(diff * ok[..., None])
++                nn = float(ok.sum()) * C
++                if nn > 0 and dd / nn < best[0]:
++                    best = (dd / nn, (yy, xx))
++            if best[1]:
++                yy, xx = best[1]
++                cb = codes_np[yy:yy+P, xx:xx+P]
++                res[y:y+P, x:x+P] = np.where(
++                    blk_gap[..., None], cb, res[y:y+P, x:x+P])
++            filled[y:y+P, x:x+P] |= blk_gap
++    rem = gap_np & ~filled
++    if rem.any():
++        qq = collections.deque()
++        dd = np.full(gap_np.shape, 1e9)
++        for yy in range(H):
++            for xx in range(W):
++                if rem[yy, xx]:
++                    if any((0 <= ny < H and 0 <= nx < W and not rem[ny, nx])
++                           for ny, nx in [(yy-1, xx), (yy+1, xx), (yy, xx-1), (yy, xx+1)]):
++                        qq.append((yy, xx)); dd[yy, xx] = 0
++        while qq:
++            yy, xx = qq.popleft()
++            d = dd[yy, xx]
++            for ny, nx in [(yy-1, xx), (yy+1, xx), (yy, xx-1), (yy, xx+1)]:
++                if 0 <= ny < H and 0 <= nx < W and rem[ny, nx] and dd[ny, nx] > d + 1:
++                    dd[ny, nx] = d + 1
++                    res[ny, nx] = res[yy, xx]
++                    qq.append((ny, nx))
++    out = src_codes.clone()
++    out[0, 0] = torch.from_numpy(res.transpose(2, 0, 1)).to(src_codes.device)
++    return out
++
