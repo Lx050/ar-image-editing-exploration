@@ -7,6 +7,20 @@
 
 本研究在自回归图像编辑基线 BitResEdit 上系统验证"源信息保持能否成为可检验的约束"，最终收敛于**解码约束家族**：三区域分离校正（v5）首次同时实现"编辑达成 + 背景质量 + 区域保真"三项指标。
 
+## 实验素材（开放访问馆藏，详见 [MATERIALS.md](./MATERIALS.md) 与 [LICENSE](./LICENSE)）
+
+| 素材 | 原图 | 说明 |
+|---|---|---|
+| 宋徽宗《竹雀图》（MET 39936，公有领域） | ![](materials/met39936_full.jpg) | 完整横卷；bird 实验源图为其子区域（模板匹配 MAD=11.8 验证） |
+| 《竹雀图》bird 实验裁剪 | ![](materials/met39936_bird_crop512.png) | 实验主图：鸟栖竹枝 + 山石，512×512 |
+| 《春柳群禽图》（CMA 147930，CC0） | ![](materials/cma147930.jpg) | 含昂首展翅孔雀；peacock 实验源图 |
+| 孔雀实验裁剪 | ![](materials/peacock512_cma147930_crop.png) | 复杂背景补全压力案例（牡丹/石/水波） |
+| 《百鸟三友图》（CMA 149880，CC0） | ![](materials/cma149880.jpg) | 泛化验证素材 |
+| 《河岸群鹅图》（AIC 212492，公有领域） | ![](materials/aic212492.jpg) | 沈铨，1750；泛化验证素材 |
+| 《五伦图》（AIC 46423，公有领域） | ![](materials/aic46423.jpg) | 任颐，1895；泛化验证素材 |
+
+> 注：立轴《柳枝粉槿双鸟图》（内部编号 met49010）来源未通过 MET API 核验，**未上传原图**，仅保留在实验对比图中。
+
 ## 核心结论
 
 | 结论 | 证据 |
@@ -16,6 +30,43 @@
 | **三区域分离校正（v5）突破** | 批次 44：bird 鸟展翅飞走 + 保护区 3.74；peacock 缺口 16.16 + 保护区 5.03 |
 | LaMa 补全的系统性色偏 | 缺口内 MAE 稳定 104.37（7 实验交叉复现），输出亮绿 vs 真值暗绿；85% 为全局色偏 |
 | LaMa 不读掩码内输入 | 正确桥/错误桥/无提示三组输出像素级恒等（0.0000） |
+
+## 关键结果对比图（按实验推进顺序）
+
+**阶段一：保持增强与解码响应校正**
+
+| 批次 | 内容 | 对比图 |
+|---|---|---|
+| 02（H2） | 桥提示三组恒等——LaMa 不读掩码内输入 | ![](results/batch02_h2_bridge.png) |
+| 15（P2） | 背景补全五法（LaMa/TELEA/热扩散/纹理/元素复用） | ![](results/batch15_P2_inpaint.png) |
+| 15（P3） | 元素级复用（源内提取/缩放/放置） | ![](results/batch15_P3_element.png) |
+
+**阶段二：10 方向并行诊断（H1–H10）**
+
+| 批次 | 内容 | 对比图 |
+|---|---|---|
+| 03（H3） | 遮挡分层补全（TELEA 对照） | ![](results/batch03_h3_layer.png) |
+| 05（H5） | 同类别供体库（通用/同类/打乱） | ![](results/batch05_h5_donor.png) |
+| 06（H6） | 底材笔触分离 | ![](results/batch06_h6_texture.png) |
+| 07（H7） | 单图自适应遮挡（L1 微调退化） | ![](results/batch07_h7_adapt.png) |
+| 08（H8） | 多尺度细结构（无多尺度接口） | ![](results/batch08_h8_scale.png) |
+| 09（H9） | 结构依赖生成顺序 | ![](results/batch09_h9_order.png) |
+| 10（H10） | 验证区评分选结果（选优成立） | ![](results/batch10_h10_verify.png) |
+
+**阶段三：BitResEdit 内部改造赛马**
+
+| 批次 | 内容 | 对比图 |
+|---|---|---|
+| 34 | 马1 编辑指令驱动 | ![](results/batch34_h34_horse1.png) |
+| 35 | 马2 v4 潜空间迭代（缺口 17.72） | ![](results/batch35_h35_horse2_v4.png) |
+| 37 | 马A 解码器特征门控 | ![](results/batch37_h37_gate.png) |
+| 38 | 马B 两遍解码连续残差（保护区 6.97） | ![](results/batch38_h38_2pass.png) |
+| 39 | 马C token 采样约束（骡子，−2.6%） | ![](results/batch39_h39_token.png) |
+| 40 | 马D 潜空间+输出域两级联合（16.16/5.03） | ![](results/batch40_h40_joint.png) |
+| 41 | 组合管线 A→D | ![](results/batch41_h41_seriesAD.png) |
+| 42 | 组合管线 D→A | ![](results/batch42_h42_seriesDA.png) |
+| 43 | 组合管线网格 | ![](results/batch43_h43_grid.png) |
+| **44** | **★ v5 三区域分离校正（最终方案）** | ![](results/batch44_h44_v5.png) |
 
 ## 解码约束家族谱系（创新点 1 证据链）
 
@@ -48,33 +99,18 @@
 
 ```
 ├── README.md                 # 本文件
+├── MATERIALS.md              # 实验素材元数据（馆藏来源/许可）
+├── LICENSE                   # 素材许可（CC0）+ 脚本许可（MIT）
 ├── EXPERIMENT_LOG.md         # 完整实验素材三元组记录（批次 00–44，含口径说明）
+├── materials/                # 素材原图（开放访问馆藏，逐图标注来源）
 ├── results/                  # 代表性对比图（按批次命名）
-│   ├── batch02_h2_bridge.png     # H2 桥提示三组恒等（LaMa 不读掩码内输入）
-│   ├── batch15_P2_inpaint.png    # P2 背景补全五法对比
-│   ├── batch15_P3_element.png    # P3 元素级复用
-│   ├── batch34_h34_horse1.png    # 马1 编辑指令驱动
-│   ├── batch35_h35_horse2_v4.png # 马2 v4 潜空间迭代
-│   ├── batch37_h37_gate.png      # 马A 解码器特征门控
-│   ├── batch38_h38_2pass.png     # 马B 两遍解码连续残差
-│   ├── batch39_h39_token.png     # 马C token 采样约束（骡子）
-│   ├── batch40_h40_joint.png     # 马D 两级联合
-│   ├── batch41–43_*.png          # 组合管线三匹马
-│   └── batch44_h44_v5.png        # ★ v5 三区域分离（最终方案）
-├── patches/                   # 服务器 BitResEdit 修改 diff（执行证据）
-│   ├── bitresedit_v4.diff         # 批次35 v4 潜空间迭代（65行）
-│   ├── bitresedit_h37.diff        # 批次37 解码器特征门控（94行）
-│   ├── bitresedit.h38.diff        # 批次38 两遍decode连续残差（170行）
-│   ├── bitresedit_h44.diff        # 批次44 v5 三区域分离（89行）
-│   └── relab_run_h44.diff         # 批次44 runner（22行）
-└── scripts/                   # 关键评估与对比脚本
-    ├── mkcompare.py               # 对比图拼合
-    └── run_lama.py                # LaMa 补全运行
+├── patches/                  # 服务器 BitResEdit 修改 diff（执行证据）
+└── scripts/                  # 关键评估与对比脚本
 ```
 
 ## 数据与版权说明
 
-- 实验图像来自芝加哥艺术博物馆、克里夫兰艺术博物馆、大都会艺术博物馆的**公开数字馆藏**，使用符合其开放访问政策。
+- 实验图像来自芝加哥艺术博物馆、克里夫兰艺术博物馆、大都会艺术博物馆的**公开数字馆藏（CC0 / 公有领域）**，使用符合其开放访问政策；逐图来源见 [MATERIALS.md](./MATERIALS.md)。
 - 所有数值口径见 `EXPERIMENT_LOG.md`（MAE 参考图 = 源图含主体、mask 二值、加权公式）。
 - 所有结论按"已查证/待补充"标注，未美化。
 
@@ -88,7 +124,7 @@
 ## 论文映射
 
 完整方法论与结果已写入学年论文《中国画自回归编辑中的区域保真与笔墨延续》：
-- 创新点 1（解码响应残差校正）：表 7 三区域版本 + 批次 38–44 证据链
+- 创新点 1（解码响应残差校正）：表 4 三区域版本 + 批次 38–44 证据链
 - 创新点 2（形变实例对应约束）：刚体/非刚体对照
 - 创新点 3（受控反例评价）：联合评价协议
 - 适用边界：LaMa 补全色偏诊断、校正强度 × 编辑保持 trade-off
