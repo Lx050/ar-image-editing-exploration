@@ -1,0 +1,89 @@
+--- lib_h40/ResidualEdit/bitresedit.py	2026-09-14 23:21:49.559682033 +0800
++++ lib_h44/ResidualEdit/bitresedit.py	2026-09-15 10:21:51.896992074 +0800
+@@ -314,6 +314,7 @@
+         decode_correction_steps: int = 0,
+         decode_correction_alpha: float = 0.15,
+         output_correction_alpha: float = 0.0,
++        gap_mask: Optional[torch.Tensor] = None,
+     ) -> Union[torch.Tensor, Tuple[torch.Tensor, dict]]:
+         """Run BitResEdit on a single ``[1, 3, H, W]`` image in ``[-1, 1]``.
+ 
+@@ -768,22 +769,49 @@
+             elif _pmask.ndim == 3:
+                 _pmask = _pmask.unsqueeze(0)
+             _pmask = _pmask.float()
+-            prot_gate_pix = 1.0 - _pmask          # protected (mask=0)
+-            bg_gate_pix = _pmask                  # bg regeneration (mask=1)
++            # === h44-v5: three-region explicit editing-region protection ===
++            # prot (mask=0)              -> src codes (identity)
++            # gap (gap_mask=1)           -> _bg_mean (background mean)
++            # edit (mask=1 \ gap_mask)   -> KEEP edit result, NO correction
++            if gap_mask is None:
++                # v4 fallback: whole mask=1 is treated as bg gap
++                _gap = _pmask
++                print("[h44-v5] gap_mask=None -> v4 fallback (mask=1 all bg_gap)", flush=True)
++            else:
++                _g = gap_mask
++                if _g.ndim == 2:
++                    _g = _g.unsqueeze(0).unsqueeze(0)
++                elif _g.ndim == 3:
++                    _g = _g.unsqueeze(0)
++                _g = _g.float().to(_pmask.device)
++                # binarize at 0.5
++                _g = (_g > 0.5).float()
++                # resize to pixel mask size to match _pmask
++                if _g.shape[-2:] != _pmask.shape[-2:]:
++                    _g = F.interpolate(_g, size=_pmask.shape[-2:], mode="nearest")
++                _gap = _g
++            prot_gate_pix = 1.0 - _pmask                    # protected
++            gap_gate_pix = _gap                             # background gap
++            edit_gate_pix = _pmask * (1.0 - _gap)           # edit region (keep)
+             prot_gate_lat = F.interpolate(
+                 prot_gate_pix, size=latent_hw, mode="bilinear", align_corners=False
+             )
+-            bg_gate_lat = F.interpolate(
+-                bg_gate_pix, size=latent_hw, mode="bilinear", align_corners=False
++            gap_gate_lat = F.interpolate(
++                gap_gate_pix, size=latent_hw, mode="bilinear", align_corners=False
+             )
+-            # v4 target: mean code of surrounding protected background (source ring).
++            edit_gate_lat = F.interpolate(
++                edit_gate_pix, size=latent_hw, mode="bilinear", align_corners=False
++            )
++            # bg_mean: mean code of protected background ring (source)
+             _w = prot_gate_lat.unsqueeze(-3)
+             _bg_mean = (src_summed_codes * _w).sum(dim=(-1, -2), keepdim=True) / \
+                        _w.sum(dim=(-1, -2), keepdim=True).clamp(min=1e-6)
+             print(
+-                f"[v4-corr] steps={decode_correction_steps} alpha={decode_correction_alpha} "
+-                f"latent_hw={tuple(latent_hw)} prot_frac={float(prot_gate_lat.mean()):.4f} "
+-                f"bg_frac={float(bg_gate_lat.mean()):.4f} "
++                f"[h44-v5] steps={decode_correction_steps} alpha={decode_correction_alpha} "
++                f"latent_hw={tuple(latent_hw)} "
++                f"prot_frac={float(prot_gate_lat.mean()):.4f} "
++                f"gap_frac={float(gap_gate_lat.mean()):.4f} "
++                f"edit_frac={float(edit_gate_lat.mean()):.4f} "
+                 f"edit_code_norm={float(edit_summed_codes.float().norm()):.3f} "
+                 f"src_code_norm={float(src_summed_codes.float().norm()):.3f} "
+                 f"bg_mean_norm={float(_bg_mean.float().norm()):.3f}",
+@@ -796,16 +824,17 @@
+                     edit_summed_codes
+                     + decode_correction_alpha * prot_gate_lat.unsqueeze(-3) * corr_prot
+                 )
+-                # (b) v4 background gap -> surrounding-bg mean code
++                # (b) background gap -> surrounding-bg mean code
+                 corr_bg = _bg_mean - edit_summed_codes
+                 edit_summed_codes = (
+                     edit_summed_codes
+-                    + decode_correction_alpha * bg_gate_lat.unsqueeze(-3) * corr_bg
++                    + decode_correction_alpha * gap_gate_lat.unsqueeze(-3) * corr_bg
+                 )
++                # (c) edit region: NO correction (keep model edit result)
+                 img = self.vae.decode(edit_summed_codes.squeeze(-3))
+                 img = ((img + 1) / 2).clamp(0, 1)
+             print(
+-                f"[v4-corr] done step={decode_correction_steps} "
++                f"[h44-v5] done step={decode_correction_steps} "
+                 f"edit_code_norm={float(edit_summed_codes.float().norm()):.3f}",
+                 flush=True,
+             )

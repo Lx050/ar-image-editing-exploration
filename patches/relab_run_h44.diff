@@ -1,0 +1,22 @@
+--- relab_run_h40.py	2026-09-14 23:21:49.563682113 +0800
++++ relab_run_h44.py	2026-09-15 10:21:51.896992074 +0800
+@@ -49,9 +49,10 @@
+     ap.add_argument("--decode-correction-steps", type=int, default=0)
+     ap.add_argument("--decode-correction-alpha", type=float, default=0.15)
+     ap.add_argument("--output-correction-alpha", type=float, default=0.0)
++    ap.add_argument("--gap-mask", type=Path, default=None)
+     args = ap.parse_args()
+ 
+-    lib = Path.home() / "relab-objrel" / "lib_h40"
++    lib = Path.home() / "relab-objrel" / "lib_h44"
+     # upstream first (falls behind), then lib on TOP so the patched
+     # ResidualEdit package wins the import.
+     sys.path.insert(0, str(args.upstream.resolve()))
+@@ -166,6 +167,7 @@
+             decode_correction_steps=args.decode_correction_steps,
+             decode_correction_alpha=args.decode_correction_alpha,
+             output_correction_alpha=args.output_correction_alpha,
++            gap_mask=(load_mask(args.gap_mask, H, W, cfg.runtime.device) if args.gap_mask else None),
+         )
+         result = img
+         meta["mode"] = "edit"

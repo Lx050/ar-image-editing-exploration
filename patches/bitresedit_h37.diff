@@ -1,0 +1,94 @@
+--- lib_h37/ResidualEdit/bitresedit.py.h37bak	2026-09-14 23:13:39.152507174 +0800
++++ lib_h37/ResidualEdit/bitresedit.py	2026-09-14 23:21:16.707020124 +0800
+@@ -289,6 +289,61 @@
+     # ------------------------------------------------------------------
+ 
+     @torch.no_grad()
++    def _gated_decode(
++        self,
++        z_edit: torch.Tensor,
++        z_src: torch.Tensor,
++        gt_mask: torch.Tensor,
++        mix: float,
++    ) -> torch.Tensor:
++        """VAE decoder with bottleneck feature-space mask gating (batch 37).
++
++        Runs both code tensors through conv_in + mid to obtain the
++        bottleneck features, mixes them spatially with the downsampled GT
++        mask, then decodes the mixed feature map through the shared
++        up-sampling head. Returns image in [-1, 1] (clamped), matching
++        AutoEncoder.decode. gated = mix*m*h_edit + (1-mix*m)*h_src.
++        """
++        dec = self.vae.decoder
++
++        def _bottleneck(z: torch.Tensor) -> torch.Tensor:
++            h = dec.conv_in(z)
++            h = dec.mid.block_1(h)
++            if (
++                getattr(dec, "cnn_param", {}).get("cnn_attention", "no") == "yes"
++                and hasattr(dec.mid, "attn_1")
++            ):
++                h = dec.mid.attn_1(h)
++            h = dec.mid.block_2(h)
++            return h
++
++        h_e = _bottleneck(z_edit)
++        h_s = _bottleneck(z_src)
++        b, c, hf, wf = h_e.shape
++
++        m = gt_mask.float()
++        if m.ndim == 2:
++            m = m[None, None]
++        elif m.ndim == 3:
++            m = m[None]
++        m = F.interpolate(m, size=(hf, wf), mode="bilinear", align_corners=False)
++        m = m.to(h_e.dtype)
++
++        gated = mix * m * h_e + (1.0 - mix * m) * h_s
++
++        h = gated
++        for i_level in reversed(range(dec.num_resolutions)):
++            for i_block in range(dec.num_res_blocks + 1):
++                h = dec.up[i_level].block[i_block](h)
++                if len(dec.up[i_level].attn) > 0:
++                    h = dec.up[i_level].attn[i_block](h)
++            if hasattr(dec.up[i_level], "upsample"):
++                h = dec.up[i_level].upsample(h)
++        h = dec.norm_out(h)
++        h = F.silu(h)
++        h = dec.conv_out(h)
++        return torch.clamp(h, min=-1.0, max=1.0)
++
+     def edit_image(
+         self,
+         image: torch.Tensor,
+@@ -313,6 +368,7 @@
+         switch_target_prompt: Optional[str] = None,
+         decode_correction_steps: int = 0,
+         decode_correction_alpha: float = 0.15,
++        decode_gate_mix: float = 0.0,
+     ) -> Union[torch.Tensor, Tuple[torch.Tensor, dict]]:
+         """Run BitResEdit on a single ``[1, 3, H, W]`` image in ``[-1, 1]``.
+ 
+@@ -808,6 +864,21 @@
+                 f"edit_code_norm={float(edit_summed_codes.float().norm()):.3f}",
+                 flush=True,
+             )
++
++        # === h37: VAE-decoder bottleneck feature mask-gating (batch 37) ===
++        if decode_gate_mix and float(decode_gate_mix) > 0.0:
++            img = self._gated_decode(
++                edit_summed_codes.squeeze(-3),
++                src_summed_codes.squeeze(-3),
++                gt_mask,
++                float(decode_gate_mix),
++            )
++            img = ((img + 1) / 2).clamp(0, 1)
++            print(
++                f"[h37-gate] mix={float(decode_gate_mix)} "
++                f"edit_code_norm={float(edit_summed_codes.float().norm()):.3f}",
++                flush=True,
++            )
+ 
+         # Resize back to the caller's input resolution if the model
+         # rescaled internally.

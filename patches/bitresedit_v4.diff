@@ -1,0 +1,65 @@
+313a314,315
+>         decode_correction_steps: int = 0,
+>         decode_correction_alpha: float = 0.15,
+505a508,509
+>         # v4 (batch35): pure-source code path for decode-response correction
+>         src_summed_codes: Union[int, torch.Tensor] = 0
+704a709
+>                 src_summed_codes = src_summed_codes + src_codes_k  # v4 pure-source path
+749a755,810
+> 
+>         # === v4: Decode-response residual correction (batch 35) ===
+>         # (a) protected region (mask=0) pulled toward pure-source codes (identity).
+>         # (b) v4 background-regeneration region (mask=1, the gap) pulled toward the
+>         #     MEAN code of the surrounding protected background ring (computed once
+>         #     from src_summed_codes), correcting the systematic color cast that the
+>         #     model introduces when regenerating background inside the gap.
+>         if decode_correction_steps > 0:
+>             latent_hw = edit_summed_codes.shape[-2:]
+>             _pmask = gt_mask
+>             if _pmask.ndim == 2:
+>                 _pmask = _pmask.unsqueeze(0).unsqueeze(0)
+>             elif _pmask.ndim == 3:
+>                 _pmask = _pmask.unsqueeze(0)
+>             _pmask = _pmask.float()
+>             prot_gate_pix = 1.0 - _pmask          # protected (mask=0)
+>             bg_gate_pix = _pmask                  # bg regeneration (mask=1)
+>             prot_gate_lat = F.interpolate(
+>                 prot_gate_pix, size=latent_hw, mode="bilinear", align_corners=False
+>             )
+>             bg_gate_lat = F.interpolate(
+>                 bg_gate_pix, size=latent_hw, mode="bilinear", align_corners=False
+>             )
+>             # v4 target: mean code of surrounding protected background (source ring).
+>             _w = prot_gate_lat.unsqueeze(-3)
+>             _bg_mean = (src_summed_codes * _w).sum(dim=(-1, -2), keepdim=True) / \
+>                        _w.sum(dim=(-1, -2), keepdim=True).clamp(min=1e-6)
+>             print(
+>                 f"[v4-corr] steps={decode_correction_steps} alpha={decode_correction_alpha} "
+>                 f"latent_hw={tuple(latent_hw)} prot_frac={float(prot_gate_lat.mean()):.4f} "
+>                 f"bg_frac={float(bg_gate_lat.mean()):.4f} "
+>                 f"edit_code_norm={float(edit_summed_codes.float().norm()):.3f} "
+>                 f"src_code_norm={float(src_summed_codes.float().norm()):.3f} "
+>                 f"bg_mean_norm={float(_bg_mean.float().norm()):.3f}",
+>                 flush=True,
+>             )
+>             for _cs in range(decode_correction_steps):
+>                 # (a) protected -> source (identity)
+>                 corr_prot = src_summed_codes - edit_summed_codes
+>                 edit_summed_codes = (
+>                     edit_summed_codes
+>                     + decode_correction_alpha * prot_gate_lat.unsqueeze(-3) * corr_prot
+>                 )
+>                 # (b) v4 background gap -> surrounding-bg mean code
+>                 corr_bg = _bg_mean - edit_summed_codes
+>                 edit_summed_codes = (
+>                     edit_summed_codes
+>                     + decode_correction_alpha * bg_gate_lat.unsqueeze(-3) * corr_bg
+>                 )
+>                 img = self.vae.decode(edit_summed_codes.squeeze(-3))
+>                 img = ((img + 1) / 2).clamp(0, 1)
+>             print(
+>                 f"[v4-corr] done step={decode_correction_steps} "
+>                 f"edit_code_norm={float(edit_summed_codes.float().norm()):.3f}",
+>                 flush=True,
+>             )

@@ -1,0 +1,170 @@
+315a316,319
+>         h38_alphas: Optional[List[float]] = None,
+>         h38_out_dir: Optional[str] = None,
+>         h38_gt_pix: Optional[torch.Tensor] = None,
+>         h38_metric_mask: Optional[torch.Tensor] = None,
+810a815,978
+> 
+>         # ==============================================================
+>         # === h38 (batch 38): two-pass decode, continuous pixel-residual
+>         #     projected onto the VAE bottleneck (not a fixed 32x32 drop).
+>         #
+>         # Fixes the three 07b failure modes:
+>         #   (1) size alignment: the bottleneck spatial size is read from
+>         #       `edit_summed_codes.shape[-2:]` (== vae_scale_schedule[-1],
+>         #       here 32x32) and the pixel mask is interpolated to THAT
+>         #       size instead of a hardcoded grid.
+>         #   (2) multi-scale interface: we call vae.encode(...) but keep
+>         #       ONLY the continuous bottleneck feature `h` (return[0]).
+>         #       all_indices (which contains None at dropped scales) is
+>         #       never touched -> "bottleneck-only residual".
+>         #   (3) continuous float residual: delta = h_corr - z_edit is a
+>         #       float tensor, no quantization / token round-trip.
+>         #
+>         # Two-pass: pass1 already decoded into `img` (in [0,1]). We build
+>         # a corrected PIXEL target (source in protected, pass1 in gap),
+>         # encode it to the bottleneck, and for each alpha do
+>         #   z2 = z_edit + alpha * prot_lat * (h_corr - z_edit)
+>         # then re-decode (pass 2) and measure MAE over the metric region.
+>         # ==============================================================
+>         if h38_alphas:
+>             import os
+>             from pathlib import Path as _Path
+>             torch.cuda.empty_cache()
+> 
+>             # --- pixel-space gates from gt_mask (1=edit/gap, 0=protected) ---
+>             _pm = gt_mask
+>             if _pm.ndim == 2:
+>                 _pm = _pm[None, None]
+>             elif _pm.ndim == 3:
+>                 _pm = _pm[None]
+>             _pm = _pm.float()
+>             _prot = 1.0 - _pm                 # protected (mask=0)
+>             _gap = _pm                         # edit / gap region (mask=1)
+> 
+>             # pass-1 image currently in [0,1]; -> [-1,1] for the encoder.
+>             _img1_m11 = img * 2.0 - 1.0
+>             # source `image` is in [-1,1] (possibly input-res). Match spatial.
+>             _src_m11 = image
+>             if _src_m11.shape[-2:] != _img1_m11.shape[-2:]:
+>                 _src_m11 = F.interpolate(
+>                     _src_m11, size=_img1_m11.shape[-2:],
+>                     mode="bicubic", align_corners=False, antialias=True,
+>                 )
+>             # Corrected pixel target: protected <- source, gap <- pass1.
+>             _corrected = _src_m11 * _prot + _img1_m11 * _gap
+> 
+>             with torch.no_grad():
+>                 _h_corr = self.vae.encode(
+>                     _corrected, scale_schedule=scale_schedule
+>                 )[0]                              # [B, C, 32, 32] float32
+> 
+>             _z_edit = edit_summed_codes         # [B, C, 1, 32, 32] (the size-1 is -3)
+>             _hf, _wf = _z_edit.shape[-2], _z_edit.shape[-1]
+>             _C = _z_edit.shape[1]
+>             # h_corr is 4D [B,C,hf,wf]; insert the size-1 axis at -3 so it
+>             # matches z_edit's [B,C,1,hf,wf] layout (NOT unsqueeze(1), which
+>             # would mis-place the channel axis and broadcast a 32x tensor).
+>             _h_corr_bc = _h_corr.unsqueeze(2).to(dtype=_z_edit.dtype)
+>             if _h_corr_bc.shape[-2:] != (_hf, _wf):
+>                 _h_corr_bc = F.interpolate(
+>                     _h_corr_bc.reshape(B, _C, *_h_corr_bc.shape[-2:]),
+>                     size=(_hf, _wf), mode="bilinear", align_corners=False,
+>                 ).reshape(B, _C, 1, _hf, _wf)
+>             _delta = _h_corr_bc - _z_edit       # continuous float residual
+> 
+>             # protected gate at bottleneck resolution (the h38 lever).
+>             _prot_lat = F.interpolate(
+>                 _prot, size=(_hf, _wf), mode="bilinear", align_corners=False
+>             ).to(dtype=_z_edit.dtype)
+> 
+>             # --- metric reference (GT in [0,1]) and metric mask ---
+>             if h38_gt_pix is not None:
+>                 _gt = h38_gt_pix.float()
+>                 if _gt.ndim == 3:
+>                     _gt = _gt.unsqueeze(0)
+>             else:
+>                 _gt = (_src_m11 + 1.0) / 2.0    # default: source image
+>             if _gt.shape[-2:] != img.shape[-2:]:
+>                 _gt = F.interpolate(
+>                     _gt, size=img.shape[-2:], mode="bicubic",
+>                     align_corners=False, antialias=True,
+>                 )
+>             if h38_metric_mask is not None:
+>                 _mm = h38_metric_mask.float()
+>                 if _mm.ndim == 2:
+>                     _mm = _mm[None, None]
+>                 elif _mm.ndim == 3:
+>                     _mm = _mm[None]
+>             else:
+>                 _mm = _prot                     # default: measure protected region
+> 
+>             def _mae255(_out01: torch.Tensor) -> Tuple[float, float]:
+>                 """Return (protected_MAE, gap_MAE) in 0-255 units over the
+>                 respective regions vs _gt."""
+>                 _d = (_out01 - _gt).abs().mean(dim=1, keepdim=True)  # [B,1,H,W]
+>                 def _region(_g: torch.Tensor) -> float:
+>                     if _g.shape[-2:] != _d.shape[-2:]:
+>                         _g = F.interpolate(
+>                             _g, size=_d.shape[-2:], mode="bilinear",
+>                             align_corners=False,
+>                         )
+>                     return float((_d * _g).sum() / _g.sum().clamp(min=1e-6) * 255.0)
+>                 return _region(_prot), _region(_gap)
+> 
+>             print(
+>                 f"[h38] bottleneck=({_hf},{_wf}) C={_C} "
+>                 f"z_edit_shape={tuple(_z_edit.shape)} h_corr_shape={tuple(_h_corr_bc.shape)} "
+>                 f"alpha_grid={list(h38_alphas)} "
+>                 f"|delta|_mean={float(_delta.float().abs().mean()):.4f} "
+>                 f"|z_edit|={float(_z_edit.float().norm()):.2f} "
+>                 f"prot_frac={float(_prot.mean()):.3f} gap_frac={float(_gap.mean()):.3f}",
+>                 flush=True,
+>             )
+> 
+>             _rows = []
+>             _p0, _g0 = _mae255(img)
+>             _rows.append(("pass1", 0.0, _p0, _g0))
+>             _best_img = img
+>             _best_key = "pass1"
+>             # criterion: minimize the user metric mask region MAE
+>             def _metric_of(p: float, g: float) -> float:
+>                 # if caller's metric mask is dominated by gap, use gap MAE;
+>                 # else protected. Detect from mask coverage.
+>                 return g if float(_gap.mean()) > float(_prot.mean()) else p
+> 
+>             for _a in h38_alphas:
+>                 _z2 = _z_edit + float(_a) * _prot_lat.unsqueeze(-3) * _delta
+>                 with torch.no_grad():
+>                     _im2 = self.vae.decode(_z2.squeeze(-3))
+>                 _im2 = ((_im2 + 1.0) / 2.0).clamp(0, 1)
+>                 if _im2.shape[-2:] != img.shape[-2:]:
+>                     _im2 = F.interpolate(
+>                         _im2, size=img.shape[-2:], mode="bicubic",
+>                         align_corners=False, antialias=True,
+>                     ).clamp(0, 1)
+>                 _p, _g = _mae255(_im2)
+>                 _rows.append((f"a={_a}", float(_a), _p, _g))
+>                 if h38_out_dir:
+>                     os.makedirs(h38_out_dir, exist_ok=True)
+>                     from AREdit.utils import save_image as _save
+>                     _save(_im2, str(_Path(h38_out_dir) / f"h38_a{_a}.png"))
+>                 if _metric_of(_p, _g) < _metric_of(_p0, _g0):
+>                     _p0, _g0, _best_img, _best_key = _p, _g, _im2, f"a={_a}"
+> 
+>             print(
+>                 "[h38-grid] " +
+>                 " | ".join(
+>                     f"{n}: prot={p:.3f} gap={g:.3f}" for n, _, p, g in _rows
+>                 ) +
+>                 f"  || chosen={_best_key}",
+>                 flush=True,
+>             )
+>             if h38_out_dir:
+>                 os.makedirs(h38_out_dir, exist_ok=True)
+>                 from AREdit.utils import save_image as _save
+>                 _save(img, str(_Path(h38_out_dir) / "h38_pass1.png"))
+>                 _save(_best_img, str(_Path(h38_out_dir) / "h38_best.png"))
+>             # Hand the best variant downstream; the resize-to-input below
+>             # then maps it to the caller's resolution.
+>             img = _best_img
